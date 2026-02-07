@@ -84,6 +84,8 @@ class VsCodeTasksPlugin(BasePlugin):
         Remove // and /* */ comments from JSON content (JSONC format).
 
         VS Code allows comments in tasks.json, but standard JSON parser doesn't.
+        This implementation respects string boundaries to avoid treating URLs
+        like https:// as comment markers.
 
         Args:
             content: JSONC content
@@ -91,13 +93,59 @@ class VsCodeTasksPlugin(BasePlugin):
         Returns:
             JSON content with comments removed
         """
-        # Remove single-line comments (// ...)
-        content = re.sub(r'//.*?$', '', content, flags=re.MULTILINE)
+        result = []
+        i = 0
+        in_string = False
+        escape_next = False
 
-        # Remove multi-line comments (/* ... */)
-        content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
+        while i < len(content):
+            char = content[i]
 
-        return content
+            # Handle escape sequences in strings
+            if in_string and escape_next:
+                result.append(char)
+                escape_next = False
+                i += 1
+                continue
+
+            # Track string boundaries
+            if char == '"' and not escape_next:
+                in_string = not in_string
+                result.append(char)
+                i += 1
+                continue
+
+            # Mark next character as escaped
+            if char == '\\' and in_string:
+                escape_next = True
+                result.append(char)
+                i += 1
+                continue
+
+            # Only process comments outside of strings
+            if not in_string:
+                # Check for // single-line comment
+                if i + 1 < len(content) and content[i:i+2] == '//':
+                    # Skip until end of line
+                    while i < len(content) and content[i] != '\n':
+                        i += 1
+                    continue
+
+                # Check for /* multi-line comment */
+                if i + 1 < len(content) and content[i:i+2] == '/*':
+                    # Skip until */
+                    i += 2
+                    while i + 1 < len(content):
+                        if content[i:i+2] == '*/':
+                            i += 2
+                            break
+                        i += 1
+                    continue
+
+            result.append(char)
+            i += 1
+
+        return ''.join(result)
 
     def _scan_tasks_file(self, tasks_path: Path, root: Path) -> list[Finding]:
         """
@@ -123,7 +171,8 @@ class VsCodeTasksPlugin(BasePlugin):
 
         except json.JSONDecodeError as e:
             logger.warning(f"Malformed JSON in {tasks_path}: {e}")
-            return []
+            # Fallback: scan raw content for suspicious patterns
+            return self._scan_raw_content(raw_content, tasks_path, root)
         except Exception as e:
             logger.warning(f"Could not read {tasks_path}: {e}")
             return []
@@ -175,6 +224,35 @@ class VsCodeTasksPlugin(BasePlugin):
                 for arg in args:
                     if isinstance(arg, str):
                         findings.extend(self._analyze_command(arg, task_label, relative_path))
+
+            # Check platform-specific commands (osx, linux, windows)
+            for platform in ["osx", "linux", "windows"]:
+                if platform in task and isinstance(task[platform], dict):
+                    platform_config = task[platform]
+
+                    # Check platform-specific command
+                    platform_command = platform_config.get("command", "")
+                    if platform_command and isinstance(platform_command, str):
+                        findings.extend(
+                            self._analyze_command(
+                                platform_command,
+                                f"{task_label} ({platform})",
+                                relative_path
+                            )
+                        )
+
+                    # Check platform-specific args
+                    platform_args = platform_config.get("args", [])
+                    if platform_args and isinstance(platform_args, list):
+                        for arg in platform_args:
+                            if isinstance(arg, str):
+                                findings.extend(
+                                    self._analyze_command(
+                                        arg,
+                                        f"{task_label} ({platform})",
+                                        relative_path
+                                    )
+                                )
 
             # Check presentation settings (hidden output)
             presentation = task.get("presentation", {})
@@ -262,6 +340,103 @@ class VsCodeTasksPlugin(BasePlugin):
                     plugin_name=self.get_metadata()["name"],
                 )
             )
+
+        return findings
+
+    def _scan_raw_content(self, content: str, tasks_path: Path, root: Path) -> list[Finding]:
+        """
+        Fallback scanner for malformed JSON files.
+
+        When JSON parsing fails, scan the raw text for known malicious patterns.
+        This ensures we don't miss attacks hidden in deliberately malformed files.
+
+        Args:
+            content: Raw file content
+            tasks_path: Path to the tasks file
+            root: Root directory being scanned
+
+        Returns:
+            List of findings from raw content scanning
+        """
+        findings = []
+
+        try:
+            relative_path = tasks_path.relative_to(root)
+        except ValueError:
+            relative_path = tasks_path
+
+        # Check for critical auto-execution pattern
+        if re.search(r'"runOn"\s*:\s*"folderOpen"', content, re.IGNORECASE):
+            findings.append(
+                Finding(
+                    rule_id="VSC-001",
+                    rule_name="Auto-executing task on folder open",
+                    severity=Severity.CRITICAL,
+                    file_path=relative_path,
+                    matched_content="runOn: folderOpen (detected in malformed JSON)",
+                    description="CRITICAL: Malformed tasks.json contains auto-execution pattern",
+                    recommendation="Remove auto-execution immediately. File appears deliberately malformed to evade detection.",
+                    plugin_name=self.get_metadata()["name"],
+                )
+            )
+
+        # Check for suspicious shell commands
+        shell_patterns = [
+            (r'curl.*\|.*(?:sh|bash)', "curl | sh"),
+            (r'wget.*\|.*(?:sh|bash)', "wget | sh"),
+            (r'\beval\s*\(', "eval()"),
+            (r'/dev/tcp/', "/dev/tcp/"),
+        ]
+
+        for pattern, description in shell_patterns:
+            matches = re.finditer(pattern, content, re.IGNORECASE)
+            for match in matches:
+                findings.append(
+                    Finding(
+                        rule_id="VSC-003",
+                        rule_name="Suspicious shell command in task",
+                        severity=Severity.HIGH,
+                        file_path=relative_path,
+                        matched_content=match.group()[:200],
+                        description=f"Malformed tasks.json contains suspicious pattern: {description}",
+                        recommendation="Review carefully. Malformed JSON with shell injection patterns is highly suspicious.",
+                        plugin_name=self.get_metadata()["name"],
+                    )
+                )
+
+        # Check for hidden presentation
+        if re.search(r'"reveal"\s*:\s*"never"', content, re.IGNORECASE):
+            findings.append(
+                Finding(
+                    rule_id="VSC-004",
+                    rule_name="Hidden task presentation",
+                    severity=Severity.MEDIUM,
+                    file_path=relative_path,
+                    matched_content='reveal: "never"',
+                    description="Malformed tasks.json configured to hide task output",
+                    recommendation="Verify why output is hidden. Combined with malformed JSON, this is suspicious.",
+                    plugin_name=self.get_metadata()["name"],
+                )
+            )
+
+        # Check for base64 content
+        base64_matches = detect_base64(content, min_length=40)
+        if base64_matches:
+            findings.append(
+                Finding(
+                    rule_id="VSC-002",
+                    rule_name="Base64 content in task file",
+                    severity=Severity.HIGH,
+                    file_path=relative_path,
+                    matched_content=base64_matches[0].matched_text[:200],
+                    description="Malformed tasks.json contains base64-encoded content",
+                    recommendation="Decode and inspect. Base64 in malformed JSON is highly suspicious.",
+                    plugin_name=self.get_metadata()["name"],
+                )
+            )
+
+        if findings:
+            logger.info(f"Fallback raw scan detected {len(findings)} issue(s) in malformed JSON")
 
         return findings
 

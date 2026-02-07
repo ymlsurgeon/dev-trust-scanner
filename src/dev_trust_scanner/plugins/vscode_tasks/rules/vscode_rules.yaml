@@ -4,8 +4,8 @@ rules:
     severity: "critical"
     description: "Task configured to run automatically when folder opens - Contagious Interview attack vector"
     patterns:
-      - '"runOn"\\s*:\\s*"folderOpen"'
-      - '"runOptions"\\s*:[^}]*"runOn"\\s*:\\s*"folderOpen"'
+      - '"runOn"\s*:\s*"folderOpen"'
+      - '"runOptions"\s*:[^}]*"runOn"\s*:\s*"folderOpen"'
     recommendation: "CRITICAL: Remove auto-execution immediately. Tasks should only run on explicit user action. This is a known malware technique."
 
   - id: "VSC-002"
@@ -20,13 +20,13 @@ rules:
     severity: "high"
     description: "Task executes shell commands commonly used in attacks"
     patterns:
-      - "curl.*\\|.*(?:sh|bash)"
-      - "wget.*\\|.*(?:sh|bash)"
-      - "\\beval\\s*\\("
-      - "powershell.*-enc"
-      - "\\bIEX\\b"
-      - "/dev/tcp/"
-      - "bash\\s+-i"
+      - 'curl.*\|.*(?:sh|bash)'
+      - 'wget.*\|.*(?:sh|bash)'
+      - '\beval\s*\('
+      - 'powershell.*-enc'
+      - '\bIEX\b'
+      - '/dev/tcp/'
+      - 'bash\s+-i'
     recommendation: "Review the command carefully. This pattern is commonly used for remote code execution."
 
   - id: "VSC-004"
@@ -34,9 +34,9 @@ rules:
     severity: "medium"
     description: "Task configured to hide output (presentation.reveal: never/silent)"
     patterns:
-      - '"reveal"\\s*:\\s*"never"'
-      - '"reveal"\\s*:\\s*"silent"'
-      - '"echo"\\s*:\\s*false'
+      - '"reveal"\s*:\s*"never"'
+      - '"reveal"\s*:\s*"silent"'
+      - '"echo"\s*:\s*false'
     recommendation: "Verify why task output is hidden. Malware often hides execution to avoid detection."
 
   - id: "VSC-005"
@@ -44,11 +44,11 @@ rules:
     severity: "medium"
     description: "Task makes network calls which may download malware or exfiltrate data"
     patterns:
-      - "https?://"
-      - "\\bcurl\\b"
-      - "\\bwget\\b"
-      - "Invoke-WebRequest"
-      - "Invoke-RestMethod"
+      - 'https?://'
+      - '\bcurl\b'
+      - '\bwget\b'
+      - 'Invoke-WebRequest'
+      - 'Invoke-RestMethod'
     recommendation: "Verify the network destination and purpose. Check URLs carefully."
 
   - id: "VSC-006"
@@ -56,8 +56,8 @@ rules:
     severity: "low"
     description: "Task accesses environment variables which may include credentials"
     patterns:
-      - "\\$\\{env:"
-      - "process\\.env"
-      - "\\$env:"
-      - "\\$[A-Z_][A-Z0-9_]*"
+      - '\$\{env:'
+      - 'process\.env'
+      - '\$env:'
+      - '\$[A-Z_][A-Z0-9_]*'
     recommendation: "Verify which environment variables are accessed. Be cautious of AWS_*, API_KEY, TOKEN, SECRET variables."

