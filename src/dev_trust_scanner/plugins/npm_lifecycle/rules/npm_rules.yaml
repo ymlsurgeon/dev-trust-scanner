@@ -33,6 +33,13 @@ rules:
       - "axios\\."
       - "request\\s*\\("
       - "got\\s*\\("
+      - "require\\s*\\(['\"]https?['\"]\\)"
+      - "require\\s*\\(['\"]request['\"]\\)"
+      - "require\\s*\\(['\"]axios['\"]\\)"
+      - "require\\s*\\(['\"]got['\"]\\)"
+      - "require\\s*\\(['\"]node-fetch['\"]\\)"
+      - "https?\\.(?:get|request)\\s*\\("
+      - "http?\\.(?:get|request)\\s*\\("
     recommendation: "Verify that network calls are legitimate and necessary. Check destination URLs carefully."
 
   - id: "NPM-004"

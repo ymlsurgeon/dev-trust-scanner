@@ -10,9 +10,22 @@
 This is a sole principal for building out this tool and ensuring it's safe and secure. During the build process of this tool you will ensure that all tradtional security coding standards are met. This includes but is not limited to:
 
 - Sanitize inputs to prevent SQL injection and XSS
-- Use parameterized queries for database interaction if applicable 
+- Use parameterized queries for database interaction if applicable
 - Handle errors gracefully without exposing stack traces
 - Use established, secure cryptographic libraries and protocols; avoid custom encryption algorithms if applicable
+
+### **CRITICAL: Package Installation Safety**
+
+**NEVER install NPM packages on this machine under ANY circumstances**, including:
+
+- ❌ **NO `npm install`** - Not for malicious samples, not for known-good packages, not for testing
+- ❌ **NO `npm ci`** - Never install from package-lock.json
+- ❌ **NO lifecycle script execution** - postinstall, preinstall, etc. must never run
+- ✅ **ONLY use `npm pack`** - Downloads tarball without executing any code
+- ✅ **ONLY static analysis** - Extract tarballs, read files, analyze content
+- ✅ **Test fixtures only** - All tests use pre-created fixtures in `tests/fixtures/`
+
+**Rationale**: This is a malware analysis tool. Installing packages would execute malicious code (postinstall scripts, etc.) and compromise the development machine. All analysis must be static only.
 
 
 ## Core Principles
@@ -114,6 +127,7 @@ After completing each step, provide a brief summary:
 
 ## Things You Must NOT Do
 
+- **Do not install NPM packages.** NEVER run `npm install`, `npm ci`, or any command that executes package code. Use `npm pack` only.
 - **Do not add network calls.** This tool is offline-only. No fetching, no phoning home, no update checks.
 - **Do not use `print()`.** Use `logging` or `rich.console`.
 - **Do not use `Any` type hints** unless there is a concrete, documented reason.

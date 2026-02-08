@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from pathlib import Path
 
 import yaml
@@ -91,6 +92,145 @@ class NpmLifecyclePlugin(BasePlugin):
 
         return findings
 
+    def _extract_script_files(self, script_command: str) -> list[str]:
+        """
+        Extract JavaScript file references from a script command.
+
+        Examples:
+            "node index.js" -> ["index.js"]
+            "node ./scripts/build.js" -> ["./scripts/build.js"]
+            "npm run build && node dist/index.js" -> ["dist/index.js"]
+
+        Args:
+            script_command: The script command to parse
+
+        Returns:
+            List of .js file paths referenced in the command
+        """
+        files = []
+
+        # Pattern: node <path.js>
+        # Handles: node file.js, node ./file.js, node ../dir/file.js
+        node_pattern = r'\bnode\s+([^\s;&|]+\.js)'
+        for match in re.finditer(node_pattern, script_command):
+            files.append(match.group(1))
+
+        # Pattern: require() or import() with file path
+        # Handles: require('./file.js'), import('./file.js')
+        require_pattern = r'(?:require|import)\s*\(\s*["\']([^"\']+\.js)["\']\s*\)'
+        for match in re.finditer(require_pattern, script_command):
+            files.append(match.group(1))
+
+        return files
+
+    def _scan_js_file(
+        self, js_path: Path, root: Path, script_name: str, pkg_path: Path
+    ) -> list[Finding]:
+        """
+        Scan a JavaScript file referenced by a lifecycle script.
+
+        Args:
+            js_path: Path to the JavaScript file
+            root: Root directory being scanned
+            script_name: Name of the lifecycle script that references this file
+            pkg_path: Path to the package.json containing the script
+
+        Returns:
+            List of findings from the JavaScript file
+        """
+        findings = []
+
+        if not js_path.exists():
+            logger.debug(f"Referenced file not found: {js_path}")
+            return []
+
+        # Check file size (10MB limit)
+        if js_path.stat().st_size > 10 * 1024 * 1024:
+            logger.warning(f"Skipping {js_path}: exceeds 10MB size limit")
+            return []
+
+        # Read the JavaScript file
+        try:
+            with open(js_path, encoding="utf-8", errors="replace") as f:
+                js_content = f.read()
+        except Exception as e:
+            logger.warning(f"Could not read {js_path}: {e}")
+            return []
+
+        # Get relative path for reporting
+        try:
+            relative_path = js_path.relative_to(root)
+        except ValueError:
+            relative_path = js_path
+
+        # Apply detection rules to the JavaScript content
+        js_findings = match_rules(
+            text=js_content,
+            rules=self.rules,
+            file_path=relative_path,
+            plugin_name=self.get_metadata()["name"],
+        )
+
+        # Add context that this file is executed by a lifecycle script
+        for finding in js_findings:
+            finding.description = (
+                f"[Lifecycle script '{script_name}' executes {js_path.name}] {finding.description}"
+            )
+
+        findings.extend(js_findings)
+
+        # High entropy check
+        entropy = calculate_entropy(js_content)
+        if entropy > ENTROPY_THRESHOLD:
+            findings.append(
+                Finding(
+                    rule_id="NPM-ENTROPY",
+                    rule_name="High entropy in lifecycle script file",
+                    severity=Severity.HIGH,
+                    file_path=relative_path,
+                    matched_content=js_content[:200],
+                    description=f"File executed by '{script_name}' has high entropy ({entropy:.2f}), may contain encoded/encrypted malware",
+                    recommendation="Decode and inspect the file content. High entropy often indicates base64, compression, or encryption.",
+                    plugin_name=self.get_metadata()["name"],
+                )
+            )
+
+        # Base64 detection
+        base64_matches = detect_base64(js_content, min_length=30)
+        if base64_matches:
+            findings.append(
+                Finding(
+                    rule_id="NPM-BASE64",
+                    rule_name="Base64 content in lifecycle script file",
+                    severity=Severity.HIGH,
+                    file_path=relative_path,
+                    line_number=base64_matches[0].line_number,
+                    matched_content=base64_matches[0].matched_text,
+                    description=f"File executed by '{script_name}' contains base64-encoded content",
+                    recommendation="Decode the base64 content and verify it is legitimate.",
+                    plugin_name=self.get_metadata()["name"],
+                )
+            )
+
+        # Obfuscation detection
+        obfuscation_matches = detect_obfuscation(js_content)
+        if obfuscation_matches:
+            findings.append(
+                Finding(
+                    rule_id="NPM-OBFUSCATION",
+                    rule_name="Code obfuscation in lifecycle script file",
+                    severity=Severity.HIGH,
+                    file_path=relative_path,
+                    line_number=obfuscation_matches[0].line_number,
+                    matched_content=obfuscation_matches[0].matched_text[:200],
+                    description=f"File executed by '{script_name}' contains obfuscated code ({obfuscation_matches[0].pattern_name})",
+                    recommendation="Deobfuscate and inspect. Legitimate packages rarely use obfuscation.",
+                    plugin_name=self.get_metadata()["name"],
+                )
+            )
+
+        return findings
+
     def _scan_package_json(self, pkg_path: Path, root: Path) -> list[Finding]:
         """
         Scan a single package.json file.
@@ -131,7 +271,7 @@ class NpmLifecyclePlugin(BasePlugin):
             except ValueError:
                 relative_path = pkg_path
 
-            # Apply detection rules
+            # Apply detection rules to the script command itself
             script_findings = match_rules(
                 text=script_content,
                 rules=self.rules,
@@ -148,6 +288,19 @@ class NpmLifecyclePlugin(BasePlugin):
                     )
 
             findings.extend(script_findings)
+
+            # For lifecycle scripts, also scan any referenced JavaScript files
+            if script_name in LIFECYCLE_SCRIPTS:
+                referenced_files = self._extract_script_files(script_content)
+                for file_ref in referenced_files:
+                    # Resolve path relative to package.json location
+                    js_path = (pkg_path.parent / file_ref).resolve()
+
+                    # Scan the referenced JavaScript file
+                    js_findings = self._scan_js_file(
+                        js_path, root, script_name, pkg_path
+                    )
+                    findings.extend(js_findings)
 
             # Additional checks for lifecycle scripts
             if script_name in LIFECYCLE_SCRIPTS:

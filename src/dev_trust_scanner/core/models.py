@@ -77,8 +77,17 @@ class Rule(BaseModel):
     - Single pattern (regex)
     - Multiple patterns (OR logic)
     - Keyword list (simple string matching)
+
+    Phase 2 Extended Metadata (optional, for campaign tracking):
+    - campaign: Campaign name (e.g., "shai-hulud", "contagious-interview")
+    - confidence: Detection confidence ("high" | "medium" | "low")
+    - false_positive_rate: Measured FP rate (0.0 to 1.0)
+    - references: Threat intelligence URLs
+    - mitre_attack: MITRE ATT&CK technique IDs
+    - created/updated: ISO8601 timestamps
     """
 
+    # Core rule fields (Phase 1)
     id: str = Field(..., description="Unique rule identifier")
     name: str = Field(..., description="Human-readable rule name")
     severity: Severity = Field(..., description="Severity if rule matches")
@@ -87,6 +96,28 @@ class Rule(BaseModel):
     patterns: Optional[list[str]] = Field(None, description="Multiple patterns (OR)")
     keywords: Optional[list[str]] = Field(None, description="Simple keyword list")
     recommendation: str = Field(..., description="Remediation advice")
+
+    # Extended metadata fields (Phase 2 - all optional for backward compatibility)
+    campaign: Optional[str] = Field(
+        None, description="Campaign name (e.g., 'shai-hulud')"
+    )
+    confidence: Optional[str] = Field(
+        None, description="Detection confidence: 'high' | 'medium' | 'low'"
+    )
+    false_positive_rate: Optional[float] = Field(
+        None,
+        description="Measured false positive rate (0.0 = 0%, 1.0 = 100%)",
+        ge=0.0,
+        le=1.0,
+    )
+    references: Optional[list[str]] = Field(
+        None, description="Threat intelligence URLs and documentation"
+    )
+    mitre_attack: Optional[list[str]] = Field(
+        None, description="MITRE ATT&CK technique IDs (e.g., T1195.002)"
+    )
+    created: Optional[str] = Field(None, description="Rule creation date (ISO8601)")
+    updated: Optional[str] = Field(None, description="Last update date (ISO8601)")
 
     @model_validator(mode="after")
     def validate_matching_strategy(self):
